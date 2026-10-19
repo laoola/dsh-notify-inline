@@ -125,13 +125,19 @@ __dshNotifyInline.setConfig({ banner: false, volume: 0.3 })
 
 设置持久化在 `localStorage['dshNotifyInline.config']`。
 
-## 安装（本地开发）
+## 安装
 
-三件套（参照 dsh-instruction-tracker 先例）：
+### 从 GitHub 安装（推荐）
+
+1. `~/.dsh/profiles/web/package.json` 的 `dependencies` 加 `"dsh-notify-inline": "github:laoola/dsh-notify-inline"`，跑 `pnpm install`。
+2. 同文件 `dsh.profile.bundles` 追加 `"dsh-notify-inline"`。
+3. 刷新页面（client bundle 走静态 combo，页面刷新即生效）；改代码/升级版本后 Ctrl+F5 强刷即可。
+
+### 本地开发（link 方式）
 
 1. `~/.dsh/profiles/web/package.json` 的 `dependencies` 加 `"dsh-notify-inline": "link:D:/GitCode/dshplugin/dsh-notify-inline"`，跑 `pnpm install`（同步 lock + 建 node_modules Junction）。
-2. 同文件 `dsh.profile.bundles` 追加 `"dsh-notify-inline/client.js"`。
-3. 重启 dsh web 或刷新页面（client bundle 走静态 combo，页面刷新即生效）。
+2. 同文件 `dsh.profile.bundles` 追加 `"dsh-notify-inline"`。
+3. 重启 dsh web 或刷新页面。
 
 宿主半边（`index.js`）是 no-op（`inject: []` + `apply`），仅满足 cordis 装配契约（缺 `inject` 导出会在激活时报 `cannot get property … without inject`，见 dsh-instruction-tracker 踩坑记录）。
 
@@ -139,7 +145,7 @@ __dshNotifyInline.setConfig({ banner: false, volume: 0.3 })
 
 纯客户端插件，卸载即回退，不留残余：
 
-1. `~/.dsh/profiles/web/package.json`：从 `dependencies` 删除 `"dsh-notify-inline"` 行、从 `dsh.profile.bundles` 删除 `"dsh-notify-inline/client.js"` 行。
+1. `~/.dsh/profiles/web/package.json`：从 `dependencies` 删除 `"dsh-notify-inline"` 行、从 `dsh.profile.bundles` 删除 `"dsh-notify-inline"` 行。
 2. `pnpm install`（移除 node_modules Junction 并同步 lock）。
 3. 刷新页面。插件的 `ctx.effect` disposer 会：恢复被标记的 `document.title`、移除铃铛/面板/横幅/浮动按钮 DOM、退订全部 store —— 宿主无报错，token-monitor 不受影响（本插件从不写它的文件，仅排序上排其左侧）。
 
