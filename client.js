@@ -447,10 +447,59 @@
         }
         return false;
       }
-      function unhandledCount() { // 角标 = 未处理条目数（P1 未裁决 + P2 未查看）
+      function unhandledCount() { // 未处理条目数（P1 未裁决 + P2 未查看）；v1.6 起不再用于角标/面板头
         var c = 0;
         for (var i = 0; i < items.length; i++) if (!items[i].resolved) c++;
         return c;
+      }
+      /* ══════════════ v1.6：P2 融合（同标题 + 同一分钟 → 一条） ══════════════
+         融合键 = 会话标题 sessionLabel + 分钟桶 floor(at / 60000)。子代理会话继承父会话标题，
+         旧口径按 sessionId 聚合会被拆成多行；改按标题融合后同分钟同名条目合成一条，跨分钟仍分行。
+         纯渲染层：items 数组结构、localStorage 键、resolve 语义全部不动。 */
+      var GROUP_BUCKET_MS = 60000;
+      function p2LabelOf(n) { // 标题兜底口径与 P1/P2 行展示保持一致
+        var sid = n.sessionId || '';
+        return n.sessionLabel || (sid === currentSessionId() ? '当前会话' : sid || '会话');
+      }
+      function p2GroupKey(n) { // 融合键：标题 + 分钟桶（仅内存用，不下发 DOM）
+        return p2LabelOf(n) + '\u0000' + Math.floor((Number(n.at) || 0) / GROUP_BUCKET_MS);
+      }
+      function buildP2Groups(list) { // list = 未处理 P2 条目；返回按组内最新时间倒序的组数组
+        var map = Object.create(null), out = [];
+        for (var i = 0; i < list.length; i++) {
+          var n = list[i];
+          var k = p2GroupKey(n);
+          var g = map[k];
+          if (!g) { g = { label: p2LabelOf(n), list: [], jumpFailed: false }; map[k] = g; out.push(g); }
+          g.list.push(n);
+          if (n.jumpFailed) g.jumpFailed = true;
+        }
+        for (var j = 0; j < out.length; j++) {
+          var grp = out[j];
+          // 组内时间倒序：首条=最新（「查看」跳它、时间显示它、meta 用它的 sub）
+          grp.list.sort(function (a, b) { return (Number(b.at) || 0) - (Number(a.at) || 0); });
+          var latest = grp.list[0];
+          grp.latest = latest;
+          grp.jumpSid = (latest && latest.sessionId) || '';
+          if (!grp.jumpSid) { // 最新条目无 sid 时退到组内首个有 sid 的条目
+            for (var s = 0; s < grp.list.length; s++) {
+              if (grp.list[s].sessionId) { grp.jumpSid = grp.list[s].sessionId; break; }
+            }
+          }
+        }
+        out.sort(function (a, b) {
+          return ((Number(b.latest && b.latest.at)) || 0) - ((Number(a.latest && a.latest.at)) || 0);
+        });
+        return out;
+      }
+      function unhandledGroupsCount() { // v1.6：角标/面板头 = 未处理组数（P1 逐条计 + P2 融合组每组计 1）
+        var p1 = 0, p2 = [];
+        for (var i = 0; i < items.length; i++) {
+          var n = items[i];
+          if (n.resolved) continue;
+          if (n.pr === 1) p1++; else p2.push(n);
+        }
+        return p1 + buildP2Groups(p2).length;
       }
       function applyTitle() {
         try {
@@ -1295,7 +1344,7 @@
       }
       function renderBadge() {
         if (!badgeEl) return;
-        var c = unhandledCount(); // 返修 #19：角标 = 未处理条目数
+        var c = unhandledGroupsCount(); // v1.6：角标 = 未处理组数（P1 逐条 + P2 融合组各计 1）
         var prev = badgeEl.textContent;
         badgeEl.textContent = c > 99 ? '99+' : String(c);
         badgeEl.classList.toggle('dshni-show', c > 0);
@@ -1318,14 +1367,45 @@
         html += '<button class="dshni-btn" data-act="go">' + (n.pr === 1 ? '去处理' : '查看') + '</button>';
         return '<div class="dshni-actions">' + html + '</div>';
       }
+      // v1.6：融合组行 HTML（纯函数：渲染与逻辑层自测共用）
+      // 单条消息口径——标题后只跟 kind 标签，不显示条数（无「· N 条新动态」、无「N 个会话」）；
+      // meta 显示组内最新条目的 sub；时间显示组内最新时间；data-gids 供「查看」成功后整组 resolve。
+      function groupRowHtml(g) {
+        var latest = g.latest; // 组内时间倒序首条 = 最新
+        var gids = g.list.map(function (n) { return n.id; }).join(',');
+        return '<div class="dshni-item dshni-pr2 dshni-group' + (g.jumpFailed ? ' dshni-group-fail' : '') + '" data-sid="' + esc(g.jumpSid || '_') + '" data-gids="' + esc(gids) + '">' +
+          '<div class="dshni-ico">✅</div>' +
+          '<div class="dshni-body">' +
+            '<div class="dshni-title">' + esc(g.label) + '<span class="dshni-tag">' + esc(KIND_META.done ? KIND_META.done.label : '回复完成') + '</span></div>' +
+            (latest && latest.sub ? '<div class="dshni-meta"><span style="word-break:break-all">最新：' + esc(latest.sub) + '</span></div>' : '') +
+            (g.jumpFailed ? '<div class="dshni-jumpfail">⚠ 跳转失败，请手动前往该会话处理</div>' : '') +
+            '<div class="dshni-actions"><button class="dshni-btn" data-act="gogroup">查看</button></div>' +
+          '</div>' +
+          '<div class="dshni-time">' + hhmm(latest ? latest.at : Date.now()) + '</div>' +
+        '</div>';
+      }
+      // v1.6：整组转已处理（组内可能跨多个 sid）→ 统一走 pruneResolved（resolvedTotal 累计 + 防抖落盘）
+      function resolveGroupItems(groupItems) {
+        var touched = false;
+        for (var i = 0; i < groupItems.length; i++) {
+          var n = groupItems[i];
+          if (!n || n.resolved) continue;
+          n.resolved = true; n.read = true; n.jumpFailed = false;
+          touched = true;
+        }
+        if (!touched) return 0;
+        var removed = pruneResolved();
+        applyTitle(); emit();
+        return removed;
+      }
       function renderPanel() {
         if (!panelEl) return;
         var headCnt = panelEl.querySelector('.dshni-cnt');
         var headPending = panelEl.querySelector('.dshni-pending');
         var list = panelEl.querySelector('.dshni-panel-list');
         if (!list) return;
-        var c = unhandledCount(); // 返修 #19：头部 = 未处理总数
-        if (headCnt) headCnt.textContent = c > 0 ? c + ' 条未处理' : '';
+        var c = unhandledGroupsCount(); // v1.6：头部 = 未处理组数
+        if (headCnt) headCnt.textContent = c > 0 ? c + ' 个待处理' : '';
         var p1 = 0;
         for (var pi = 0; pi < items.length; pi++) if (items[pi].pr === 1 && !items[pi].resolved) p1++;
         if (headPending) headPending.textContent = p1 > 0 ? p1 + ' 条待裁决' : '';
@@ -1343,23 +1423,14 @@
           if (ka !== kb) return kb - ka;
           return b.at - a.at;
         });
-        // v1.4 #25：P1 逐条展示；未处理 P2 按会话聚合为一行（纯渲染层，items 数组结构不动）
+        // v1.6：P1 逐条展示；未处理 P2 按「会话标题 + 分钟桶」融合为一行（纯渲染层，items 数组结构不动）
         var p1Rows = [];
-        var groups = []; // {sid,label,list,jumpFailed}
-        var gidx = Object.create(null);
+        var p2List = [];
+        var groups = []; // {label,list,jumpFailed,latest,jumpSid}（buildP2Groups 产出）
         for (var gi = 0; gi < sorted.length; gi++) {
-          var gn = sorted[gi];
-          if (gn.pr === 1) { p1Rows.push(gn); continue; }
-          var sid = gn.sessionId || '_';
-          var g = gidx[sid];
-          if (!g) {
-            g = { sid: sid, list: [], jumpFailed: false };
-            g.label = gn.sessionLabel || (sid === currentSessionId() ? '当前会话' : sid || '会话');
-            gidx[sid] = g; groups.push(g);
-          }
-          g.list.push(gn);
-          if (gn.jumpFailed) g.jumpFailed = true;
+          if (sorted[gi].pr === 1) p1Rows.push(sorted[gi]); else p2List.push(sorted[gi]);
         }
+        groups = buildP2Groups(p2List);
         list.innerHTML =
           p1Rows.map(function (n) {
             return '<div class="dshni-item dshni-pr' + n.pr + (n.read ? '' : ' dshni-unread') + '" data-id="' + n.id + '">' +
@@ -1374,19 +1445,7 @@
               '<div class="dshni-time">' + hhmm(n.at) + '</div>' +
             '</div>';
           }).join('') +
-          groups.map(function (g) {
-            var latest = g.list[0]; // sorted 时间倒序，组内首条最新
-            return '<div class="dshni-item dshni-pr2 dshni-group' + (g.jumpFailed ? ' dshni-group-fail' : '') + '" data-sid="' + esc(g.sid) + '">' +
-              '<div class="dshni-ico">✅</div>' +
-              '<div class="dshni-body">' +
-                '<div class="dshni-title">' + esc(g.label) + ' · ' + g.list.length + ' 条新动态<span class="dshni-tag">' + esc(KIND_META.done ? KIND_META.done.label : '回复完成') + '</span></div>' +
-                (latest && latest.sub ? '<div class="dshni-meta"><span style="word-break:break-all">最新：' + esc(latest.sub) + '</span></div>' : '') +
-                (g.jumpFailed ? '<div class="dshni-jumpfail">⚠ 跳转失败，请手动前往该会话处理</div>' : '') +
-                '<div class="dshni-actions"><button class="dshni-btn" data-act="gogroup">查看</button></div>' +
-              '</div>' +
-              '<div class="dshni-time">' + hhmm(latest ? latest.at : Date.now()) + '</div>' +
-            '</div>';
-          }).join('');
+          groups.map(groupRowHtml).join('');
         // 绑定动作（事件委托在 mountPanel 时挂一次）
       }
       function mountPanelEvents() {
@@ -1396,11 +1455,22 @@
           var btn = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
           var itemEl = ev.target && ev.target.closest ? ev.target.closest('.dshni-item') : null;
           if (!itemEl) return;
-          // v1.4 #25：P2 会话聚合行「查看」= 整组跳转（jumpSessionId 成功→组内条目全 resolve 删除
-          // +角标减 N+resolvedTotal 累计；失败→组保留红字）。分支须在 data-id 条目查找前——组行无 id。
+          // v1.6：融合组「查看」= 跳组内最新条目的 sid；跳转成功 → 整组 resolve 删除（组内可能跨多个
+          // sid，如子代理会话继承父标题），失败 → 整组保留红字。分支须在 data-id 条目查找前——组行无 id。
           if (btn && btn.getAttribute('data-act') === 'gogroup') {
             var gsid = itemEl.getAttribute('data-sid');
-            if (gsid && gsid !== '_') { if (jumpSessionId(gsid)) closePanel(); }
+            var gids = String(itemEl.getAttribute('data-gids') || '').split(',');
+            var groupItems = [];
+            for (var gi2 = 0; gi2 < gids.length; gi2++) { // 跳转前先取组内条目引用（jumpSessionId 会先删同 sid 条目）
+              if (!gids[gi2]) continue;
+              for (var gj = 0; gj < items.length; gj++) if (items[gj].id === gids[gi2]) { groupItems.push(items[gj]); break; }
+            }
+            var jumped = false;
+            if (gsid && gsid !== '_') jumped = jumpSessionId(gsid);
+            if (jumped) {
+              resolveGroupItems(groupItems); // 整组消：组内跨 sid 的剩余条目一并 resolve + pruneResolved
+              closePanel();
+            }
             renderPanel(); renderBadge(); applyTitle();
             return;
           }
@@ -1856,6 +1926,11 @@
           },
           items: function () { return items.slice(); },
           unread: function () { return unhandledCount(); }, // 返修 #19：未处理条目数
+          // v1.6：未处理组数（角标/面板头同口径；P1 逐条 + P2 融合组每组计 1）
+          groups: function () { return unhandledGroupsCount(); },
+          // v1.6：逻辑层自测注入（node/console 直接塞 items，跳过路由与渲染）
+          _seedItems: function (list) { items = Array.isArray(list) ? list.slice() : []; return items.length; },
+          _items: function () { return items; },
           pending: function () {
             var c = 0;
             for (var i = 0; i < items.length; i++) if (items[i].pr === 1 && !items[i].resolved) c++;
@@ -1883,7 +1958,7 @@
           },
           focus: function (sid) { jumpSessionId(sid || currentSessionId()); }, // 返修 #19
           test: runTest,
-          _internals: { pushItem: pushItem, interactionStore: interactionStore, pendingOf: pendingOf, currentSessionId: currentSessionId, isHighRisk: isHighRisk, HIGH_RISK_RE: HIGH_RISK_RE, cleanBase: cleanBase, applyTitle: applyTitle, decide: decide, hostJump: hostJump, domJump: domJump, jumpSessionId: jumpSessionId, unhandledCount: unhandledCount, flushDoneBatch: flushDoneBatch, applyTheme: applyTheme, injectStyles: injectStyles, buildBellDOM: buildBellDOM, route: route, requestDoneConfirm: requestDoneConfirm, cancelDoneConfirm: cancelDoneConfirm, cancelAllDoneConfirms: cancelAllDoneConfirms, schedulePersist: schedulePersist, persistNow: persistNow, loadPersisted: loadPersisted, syncDoneFromStatus: syncDoneFromStatus, evalFace: evalFace, evalListRows: evalListRows, sessionNotified: sessionNotified, p2Suppressed: p2Suppressed, markSessionNotified: markSessionNotified, releaseSessionNotified: releaseSessionNotified, pruneResolved: pruneResolved, loadResolvedTotal: loadResolvedTotal, resolvedTotal: function () { return resolvedTotal; }, reportDone: reportDone }
+          _internals: { pushItem: pushItem, interactionStore: interactionStore, pendingOf: pendingOf, currentSessionId: currentSessionId, isHighRisk: isHighRisk, HIGH_RISK_RE: HIGH_RISK_RE, cleanBase: cleanBase, applyTitle: applyTitle, decide: decide, hostJump: hostJump, domJump: domJump, jumpSessionId: jumpSessionId, unhandledCount: unhandledCount, unhandledGroupsCount: unhandledGroupsCount, buildP2Groups: buildP2Groups, p2GroupKey: p2GroupKey, groupRowHtml: groupRowHtml, resolveGroupItems: resolveGroupItems, flushDoneBatch: flushDoneBatch, applyTheme: applyTheme, injectStyles: injectStyles, buildBellDOM: buildBellDOM, route: route, requestDoneConfirm: requestDoneConfirm, cancelDoneConfirm: cancelDoneConfirm, cancelAllDoneConfirms: cancelAllDoneConfirms, schedulePersist: schedulePersist, persistNow: persistNow, loadPersisted: loadPersisted, syncDoneFromStatus: syncDoneFromStatus, evalFace: evalFace, evalListRows: evalListRows, sessionNotified: sessionNotified, p2Suppressed: p2Suppressed, markSessionNotified: markSessionNotified, releaseSessionNotified: releaseSessionNotified, pruneResolved: pruneResolved, loadResolvedTotal: loadResolvedTotal, resolvedTotal: function () { return resolvedTotal; }, reportDone: reportDone }
         };
       } catch (e) {}
 
