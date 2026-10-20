@@ -137,7 +137,7 @@
       // 恢复 ≠ 新事件：恢复路径只填 items 数组重算角标，横幅/系统通知/攒批零触发。
       // mock 测试条目不持久化（不污染真实历史）。写满/异常 try-catch 降级纯内存。
       var LS_ITEMS = 'dshNotifyInline.items';
-      var LS_RESOLVED_TOTAL = 'dshNotifyInline.resolvedTotal'; // v1.4 #26：面板头「已处理 N 条」累计，跨刷新
+      var LS_RESOLVED_TOTAL_LEGACY = 'dshNotifyInline.resolvedTotal'; // v1.7：v1.4~v1.6 已废弃的「已处理 N 条」累计键，启动时清理
       var ITEMS_MAX = 200; // 与 pushItem 挤最老同口径
       var persistTimer = null;
       function slimItem(n) { // 可序列化子集：剥 interaction（live 对象，恢复后无意义）与 mock
@@ -185,31 +185,20 @@
         } catch (e) { return []; } // 无历史/损坏 JSON = 空启动
       }
 
-      /* ══════════════════════════ 已处理即消失（v1.4 #24/#26） ══════════════════════════ */
-      // resolved 条目从 items 数组直接移除（灰标签历史不再保留）；移除条数计入 resolvedTotal
-      // （面板头「已处理 N 条」累计，独立 key 持久化跨刷新）。移除后防抖落盘——盘上自然不含
+      /* ══════════════════════════ 已处理即消失（v1.4 #24） ══════════════════════════ */
+      // resolved 条目从 items 数组直接移除（灰标签历史不再保留）。移除后防抖落盘——盘上自然不含
       // 已处理条目。跳转失败条目不 resolve 不删（红字提示保留）。所有 resolve 路径收口于此：
       // decide（P1 裁决）/ jumpSessionId（跳转成功）/ resolveItemByKey（interaction 消费同步）/
       // markAllResolved（手动全部已读兜底）。
-      var resolvedTotal = 0;
-      function loadResolvedTotal() {
-        try {
-          var v = Number(root.localStorage && root.localStorage.getItem(LS_RESOLVED_TOTAL));
-          if (isFinite(v) && v > 0) resolvedTotal = Math.floor(v);
-        } catch (e) {}
-      }
-      function saveResolvedTotal() {
-        try { root.localStorage && root.localStorage.setItem(LS_RESOLVED_TOTAL, String(resolvedTotal)); } catch (e) {}
-      }
+      // v1.7：v1.4 #26 的 resolvedTotal「已处理 N 条」累计计数已移除（只增不减无信息价值），
+      // 本地键启动时清理，面板头不再展示。
       function pruneResolved() { // 返回本次移除条数（0 = 无变化）
         var kept = [], removed = 0;
         for (var i = 0; i < items.length; i++) {
           if (items[i].resolved) removed++; else kept.push(items[i]);
         }
         if (removed) {
-          resolvedTotal += removed;
           items = kept;
-          saveResolvedTotal();
           schedulePersist(); // 已处理条目不再入盘（#26 持久化口径）
         }
         return removed;
@@ -650,7 +639,7 @@
           var m = items[j];
           if (m.sessionId === sessionId && !m.resolved) { m.resolved = true; m.read = true; m.jumpFailed = false; hit = true; }
         }
-        if (hit) { pruneResolved(); applyTitle(); emit(); } // v1.4 #24：跳转成功该会话条目全删（resolvedTotal 累计+防抖落盘）
+        if (hit) { pruneResolved(); applyTitle(); emit(); } // v1.4 #24：跳转成功该会话条目全删（防抖落盘）
         return true;
       }
 
@@ -955,7 +944,7 @@
           if (!n.resolved) { n.resolved = true; n.jumpFailed = false; }
           n.read = true;
         });
-        pruneResolved(); // v1.4 #24：全部已读=全部移除（resolvedTotal 累计）
+        pruneResolved(); // v1.4 #24：全部已读=全部移除
         dismissAllBanners();
         clearDoneBatches();
         applyTitle(); emit();
@@ -983,7 +972,7 @@
           item.resolved = true;
           item.read = true;
           item.jumpFailed = false; // 返修 #19：裁决即已处理，清跳转失败标记
-          pruneResolved(); // v1.4 #24：裁决即从面板消失（内部防抖落盘+resolvedTotal 累计）
+          pruneResolved(); // v1.4 #24：裁决即从面板消失（内部防抖落盘）
           applyTitle(); emit();
           try { console.log('[dsh-notify-inline] 裁决', outcome, item.key, ok ? '(interaction.answer)' : '(mock)'); } catch (e) {}
         }
@@ -1226,7 +1215,6 @@
           '.dshni-panel-head h3{font-size:14px;font-weight:600;margin:0}',
           '.dshni-panel-head .dshni-cnt{font-size:12px;color:var(--dshni-text3)}',
           '.dshni-panel-head .dshni-pending{font-size:12px;color:var(--dshni-p1)}',
-          '.dshni-panel-head .dshni-donetotal{font-size:12px;color:var(--dshni-text3);margin-left:auto}', // v1.4 #26：已处理累计（推右，原型 resolved-count 位）
           '.dshni-panel-head button{width:24px;height:24px;margin-left:4px;background:none;border:none;border-radius:6px;color:var(--dshni-text3);font-size:12px;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;transition:background .15s ease-out,color .15s ease-out}',
           '.dshni-panel-head button:hover{background:var(--dshni-hover);color:var(--dshni-text)}',
           '.dshni-panel-head button:focus-visible{outline:2px solid var(--dshni-focus);outline-offset:2px}',
@@ -1384,7 +1372,7 @@
           '<div class="dshni-time">' + hhmm(latest ? latest.at : Date.now()) + '</div>' +
         '</div>';
       }
-      // v1.6：整组转已处理（组内可能跨多个 sid）→ 统一走 pruneResolved（resolvedTotal 累计 + 防抖落盘）
+      // v1.6：整组转已处理（组内可能跨多个 sid）→ 统一走 pruneResolved（防抖落盘）
       function resolveGroupItems(groupItems) {
         var touched = false;
         for (var i = 0; i < groupItems.length; i++) {
@@ -1409,8 +1397,6 @@
         var p1 = 0;
         for (var pi = 0; pi < items.length; pi++) if (items[pi].pr === 1 && !items[pi].resolved) p1++;
         if (headPending) headPending.textContent = p1 > 0 ? p1 + ' 条待裁决' : '';
-        var headDone = panelEl.querySelector('.dshni-donetotal'); // v1.4 #26：面板头「已处理 N 条」累计（跨刷新）
-        if (headDone) headDone.textContent = resolvedTotal > 0 ? '已处理 ' + resolvedTotal + ' 条' : '';
         if (!items.length) {
           list.innerHTML = '<div class="dshni-empty"><div style="font-size:32px;margin-bottom:8px;opacity:.5">🔕</div>暂无通知<br>对话需要你或跑完时，这里会亮</div>';
           return;
@@ -1690,7 +1676,7 @@
         panelEl.className = 'dshni-panel';
         panelEl.setAttribute('data-dshni-panel', '1');
         panelEl.innerHTML =
-          '<div class="dshni-panel-head"><h3>通知</h3><span class="dshni-cnt"></span><span class="dshni-pending"></span><span class="dshni-donetotal"></span>' +
+          '<div class="dshni-panel-head"><h3>通知</h3><span class="dshni-cnt"></span><span class="dshni-pending"></span>' +
           '<button data-act="markall">全部已读</button></div>' +
           '<div class="dshni-panel-list"></div>' +
           '<div class="dshni-drawer"></div>' +
@@ -1780,7 +1766,7 @@
           try {
             // v1.2 #21：恢复持久化条目（恢复 ≠ 新事件：只填 items + 重算角标，横幅/系统通知/攒批零触发）
             try {
-              loadResolvedTotal(); // v1.4 #26：面板头「已处理 N 条」累计跨刷新（独立 key，与条目持久化解耦）
+              try { root.localStorage && root.localStorage.removeItem(LS_RESOLVED_TOTAL_LEGACY); } catch (eLegacy) {} // v1.7：清理已废弃的「已处理 N 条」累计键
               var restoredItems = loadPersisted();
               if (restoredItems.length) {
                 items = restoredItems.concat(items);
@@ -1958,7 +1944,7 @@
           },
           focus: function (sid) { jumpSessionId(sid || currentSessionId()); }, // 返修 #19
           test: runTest,
-          _internals: { pushItem: pushItem, interactionStore: interactionStore, pendingOf: pendingOf, currentSessionId: currentSessionId, isHighRisk: isHighRisk, HIGH_RISK_RE: HIGH_RISK_RE, cleanBase: cleanBase, applyTitle: applyTitle, decide: decide, hostJump: hostJump, domJump: domJump, jumpSessionId: jumpSessionId, unhandledCount: unhandledCount, unhandledGroupsCount: unhandledGroupsCount, buildP2Groups: buildP2Groups, p2GroupKey: p2GroupKey, groupRowHtml: groupRowHtml, resolveGroupItems: resolveGroupItems, flushDoneBatch: flushDoneBatch, applyTheme: applyTheme, injectStyles: injectStyles, buildBellDOM: buildBellDOM, route: route, requestDoneConfirm: requestDoneConfirm, cancelDoneConfirm: cancelDoneConfirm, cancelAllDoneConfirms: cancelAllDoneConfirms, schedulePersist: schedulePersist, persistNow: persistNow, loadPersisted: loadPersisted, syncDoneFromStatus: syncDoneFromStatus, evalFace: evalFace, evalListRows: evalListRows, sessionNotified: sessionNotified, p2Suppressed: p2Suppressed, markSessionNotified: markSessionNotified, releaseSessionNotified: releaseSessionNotified, pruneResolved: pruneResolved, loadResolvedTotal: loadResolvedTotal, resolvedTotal: function () { return resolvedTotal; }, reportDone: reportDone }
+          _internals: { pushItem: pushItem, interactionStore: interactionStore, pendingOf: pendingOf, currentSessionId: currentSessionId, isHighRisk: isHighRisk, HIGH_RISK_RE: HIGH_RISK_RE, cleanBase: cleanBase, applyTitle: applyTitle, decide: decide, hostJump: hostJump, domJump: domJump, jumpSessionId: jumpSessionId, unhandledCount: unhandledCount, unhandledGroupsCount: unhandledGroupsCount, buildP2Groups: buildP2Groups, p2GroupKey: p2GroupKey, groupRowHtml: groupRowHtml, resolveGroupItems: resolveGroupItems, flushDoneBatch: flushDoneBatch, applyTheme: applyTheme, injectStyles: injectStyles, buildBellDOM: buildBellDOM, route: route, requestDoneConfirm: requestDoneConfirm, cancelDoneConfirm: cancelDoneConfirm, cancelAllDoneConfirms: cancelAllDoneConfirms, schedulePersist: schedulePersist, persistNow: persistNow, loadPersisted: loadPersisted, syncDoneFromStatus: syncDoneFromStatus, evalFace: evalFace, evalListRows: evalListRows, sessionNotified: sessionNotified, p2Suppressed: p2Suppressed, markSessionNotified: markSessionNotified, releaseSessionNotified: releaseSessionNotified, pruneResolved: pruneResolved, reportDone: reportDone }
         };
       } catch (e) {}
 
