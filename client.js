@@ -1215,7 +1215,7 @@
           '.dshni-panel-head h3{font-size:14px;font-weight:600;margin:0}',
           '.dshni-panel-head .dshni-cnt{font-size:12px;color:var(--dshni-text3)}',
           '.dshni-panel-head .dshni-pending{font-size:12px;color:var(--dshni-p1)}',
-          '.dshni-panel-head button{width:24px;height:24px;margin-left:4px;background:none;border:none;border-radius:6px;color:var(--dshni-text3);font-size:12px;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;transition:background .15s ease-out,color .15s ease-out}',
+          '.dshni-panel-head button{height:24px;margin-left:auto;background:none;border:none;border-radius:6px;color:var(--dshni-text3);font-size:12px;cursor:pointer;padding:0 8px;white-space:nowrap;display:flex;align-items:center;justify-content:center;transition:background .15s ease-out,color .15s ease-out}',
           '.dshni-panel-head button:hover{background:var(--dshni-hover);color:var(--dshni-text)}',
           '.dshni-panel-head button:focus-visible{outline:2px solid var(--dshni-focus);outline-offset:2px}',
           '.dshni-panel-list{overflow-y:auto;flex:1;padding:8px}',
