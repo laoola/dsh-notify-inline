@@ -139,6 +139,7 @@
       var LS_ITEMS = 'dshNotifyInline.items';
       var LS_RESOLVED_TOTAL_LEGACY = 'dshNotifyInline.resolvedTotal'; // v1.7：v1.4~v1.6 已废弃的「已处理 N 条」累计键，启动时清理
       var ITEMS_MAX = 200; // 与 pushItem 挤最老同口径
+      var EXPIRE_MS = 24 * 60 * 60 * 1000; // v1.8：条目过期线（P2 超 24h 未处理清除 / P1 超 24h 未处理转「已过期」）
       var persistTimer = null;
       function slimItem(n) { // 可序列化子集：剥 interaction（live 对象，恢复后无意义）与 mock
         return {
@@ -146,7 +147,8 @@
           title: n.title || '', sub: n.sub || '', sessionId: n.sessionId || null,
           sessionLabel: n.sessionLabel || '', at: n.at, read: !!n.read,
           resolved: !!n.resolved, jumpFailed: !!n.jumpFailed,
-          key: n.key || null, highRisk: !!n.highRisk
+          key: n.key || null, highRisk: !!n.highRisk,
+          doneCount: Number(n.doneCount) || 1, expired: !!n.expired // v1.8：同会话并入次数 + P1 过期态随盘
         };
       }
       function persistNow() {
@@ -172,6 +174,8 @@
           return arr.slice(0, ITEMS_MAX).map(function (n) {
             if (!n || typeof n !== 'object') return null;
             if (n.resolved) return null; // v1.4 #26：旧盘已处理条目恢复时直接丢弃（新口径已处理不入盘），不报错
+            // v1.8 #1：P2 完成类条目超 24h 未处理 = 化石条目，恢复前直接清除（不进面板不进角标）
+            if (n.pr !== 1 && Date.now() - (Number(n.at) || 0) > EXPIRE_MS) return null;
             return {
               id: n.id || uid(), pr: n.pr === 1 ? 1 : 2, kind: n.kind || 'done', ico: n.ico || '✅',
               tagKey: n.tagKey || '', title: n.title || '', sub: n.sub || '',
@@ -179,7 +183,8 @@
               at: Number(n.at) || Date.now(), read: !!n.read, resolved: !!n.resolved,
               jumpFailed: !!n.jumpFailed, key: n.key || null,
               interaction: null, // 恢复条目不带 live interaction（P1 恢复后走「去处理」跳转路径）
-              highRisk: !!n.highRisk, mock: false, restored: true
+              highRisk: !!n.highRisk, mock: false, restored: true,
+              doneCount: Number(n.doneCount) || 1, expired: !!n.expired // v1.8：并入次数 + P1 过期态
             };
           }).filter(Boolean);
         } catch (e) { return []; } // 无历史/损坏 JSON = 空启动
@@ -202,6 +207,40 @@
           schedulePersist(); // 已处理条目不再入盘（#26 持久化口径）
         }
         return removed;
+      }
+
+      /* ══════════════ v1.8 通知条目治理：24h 过期线 ══════════════
+         #1 P2 完成类条目超 24h 未处理 = 化石条目：启动恢复前过滤（loadPersisted）+ 运行中周期清除，
+            不再拖角标；#2 P1 条目超 24h 未处理 → 转「已过期」态（expired:true）：灰显+「已过期」标签，
+            退出角标/待裁决口径，面板保留可回看，永不自动删除。
+            检查时机 = 启动（apply 恢复链路）+ 周期轮询（apply 内 retryTimer 1.5s）。 */
+      function pruneExpiredP2() { // 返回本次清除条数（0 = 无变化）
+        var now = Date.now(), kept = [], removed = 0;
+        for (var i = 0; i < items.length; i++) {
+          var n = items[i];
+          if (n.pr === 2 && !n.resolved && now - (Number(n.at) || 0) > EXPIRE_MS) removed++;
+          else kept.push(n);
+        }
+        if (removed) { items = kept; schedulePersist(); }
+        return removed;
+      }
+      function expireP1() { // 返回本次转「已过期」条数
+        var now = Date.now(), changed = 0;
+        for (var i = 0; i < items.length; i++) {
+          var n = items[i];
+          if (n.pr === 1 && !n.resolved && !n.expired && now - (Number(n.at) || 0) > EXPIRE_MS) {
+            n.expired = true;
+            n.jumpFailed = false; // 过期条目不再跳转，残留红字提示一并清除
+            changed++;
+          }
+        }
+        if (changed) schedulePersist();
+        return changed;
+      }
+      function expireSweep() { // 启动 + 周期轮询统一入口；有变化才刷标题/角标
+        var a = pruneExpiredP2(), b = expireP1();
+        if (a || b) { applyTitle(); emit(); }
+        return a + b;
       }
 
       var attentionKeysFired = Object.create(null); // P1 key 去重（不重的一半）
@@ -429,16 +468,17 @@
         return t;
       }
       // 返修 #19：「已处理」只看 resolved（P1 裁决 / 跳转成功），read 仅面板视觉态
+      // v1.8 #2：已过期 P1 同步退出 unread 口径（标题标记不再为它亮）
       function hasUnhandled(pr) {
         for (var i = 0; i < items.length; i++) {
           var n = items[i];
-          if (!n.resolved && n.pr === pr) return true;
+          if (!n.resolved && !n.expired && n.pr === pr) return true;
         }
         return false;
       }
       function unhandledCount() { // 未处理条目数（P1 未裁决 + P2 未查看）；v1.6 起不再用于角标/面板头
         var c = 0;
-        for (var i = 0; i < items.length; i++) if (!items[i].resolved) c++;
+        for (var i = 0; i < items.length; i++) if (!items[i].resolved && !items[i].expired) c++;
         return c;
       }
       /* ══════════════ v1.6：P2 融合（同标题 + 同一分钟 → 一条） ══════════════
@@ -486,7 +526,7 @@
         for (var i = 0; i < items.length; i++) {
           var n = items[i];
           if (n.resolved) continue;
-          if (n.pr === 1) p1++; else p2.push(n);
+          if (n.pr === 1) { if (!n.expired) p1++; } else p2.push(n); // v1.8 #2：已过期 P1 退出角标口径
         }
         return p1 + buildP2Groups(p2).length;
       }
@@ -811,13 +851,15 @@
         var n = entry.list.length;
         var latest = entry.list[n - 1];
         var label = first.sessionLabel || labelForSessionId(sid === '_' ? null : sid) || '会话';
+        var cnt = Number(first.doneCount) > 1 ? Number(first.doneCount) : 0; // v1.8 #3：同会话并入后的完成次数
         routeFlush({
           pr: 2, kind: 'done', ico: '✅',
           tagKey: first.tagKey || ('done:' + sid),
           sessionId: sid === '_' ? null : sid,
           sessionLabel: first.sessionLabel || '',
           title: label + ' · 回复完成',
-          sub: n > 1 ? (n + ' 条新动态 · 最新：' + (latest.sub || '')) : (first.sub || '')
+          sub: n > 1 ? (n + ' 条新动态 · 最新：' + (latest.sub || ''))
+                     : ((cnt ? cnt + ' 次完成' + (first.sub ? ' · ' : '') : '') + (first.sub || ''))
         });
       }
       // 攒批 flush 的统一出栈通道（横幅 + 系统通知都走这里，#17）。
@@ -890,7 +932,35 @@
         });
       }
       // pushItem：所有事件无条件入 items（不丢），再路由（验收项 #4；P2 攒批 #18）
+      // v1.8 #3：同会话并入——完成事件到达时该会话存在未处理 P2 条目 → 并入原条目
+      //（at 刷新 + doneCount 累加，副标由渲染层显示「N 次完成」），不新增条目；
+      // 提示链路照常走攒批出栈（v1.3 #23 会话单次提示不受影响：标记在位只角标，标记已解除照常弹一次并重新标记）。
+      function findMergableP2(sid) { // 并入目标 = 该会话未处理、未过期的最新 P2 条目
+        var now = Date.now(), best = null;
+        for (var i = 0; i < items.length; i++) {
+          var n = items[i];
+          if (n.pr !== 2 || n.resolved) continue;
+          if ((n.sessionId || null) !== (sid || null)) continue;
+          if (now - (Number(n.at) || 0) > EXPIRE_MS) continue; // 化石条目不并入（周期清除稍后处理）
+          if (!best || (Number(n.at) || 0) > (Number(best.at) || 0)) best = n;
+        }
+        return best;
+      }
       function pushItem(o) {
+        if (o.pr === 2) {
+          var orig = findMergableP2(o.sessionId);
+          if (orig) {
+            orig.at = Date.now();                          // 并入：at 刷新（组归属随分钟桶自然迁移）
+            orig.doneCount = (Number(orig.doneCount) || 1) + 1;
+            orig.read = false;                             // 新动态重亮未读视觉态
+            if (o.sub) orig.sub = o.sub;                   // 副标摘要取最新完成
+            schedulePersist();
+            if (Number(config.doneBatchMs) > 0) { batchDone(orig); applyTitle(); } // 攒批出栈（角标照常亮）
+            else route(orig);                              // doneBatchMs=0 关闭攒批时与原 P2 同构
+            emit();
+            return orig;
+          }
+        }
         var item = {
           id: uid(), pr: o.pr, kind: o.kind, ico: o.ico, tagKey: o.tagKey,
           title: o.title, sub: o.sub || '', sessionId: o.sessionId || null,
@@ -1238,6 +1308,10 @@
           // v1.4 #24：.dshni-tag-done 灰标签样式已随功能移除（已处理条目直接消失，无历史保留）
           '.dshni-pr1 .dshni-tag{background:var(--dshni-p1bg);color:var(--dshni-p1)}',
           '.dshni-pr2 .dshni-tag{background:var(--dshni-p2bg);color:var(--dshni-p2)}',
+          // v1.8 #2：P1 已过期态——整行灰显 + 灰「已过期」标签，退出角标/待裁决口径，面板保留可回看
+          '.dshni-item.dshni-expired{opacity:.5;cursor:default}',
+          '.dshni-item.dshni-expired::before{background:var(--dshni-text3)}',
+          '.dshni-item.dshni-expired .dshni-tag{background:var(--dshni-hover);color:var(--dshni-text3)}',
           '.dshni-meta{font-size:12px;color:var(--dshni-text2);margin-top:3px;display:flex;gap:8px;align-items:center}',
           '.dshni-sess{color:var(--dshni-sess);font-weight:500}',
           // 返修 #19：跳转失败提示（条目保持未处理）
@@ -1341,6 +1415,7 @@
         }
       }
       function itemActionsHtml(n) {
+        if (n.expired) return ''; // v1.8 #2：已过期条目纯回看，不再提供裁决/跳转操作
         var html = '';
         if (n.pr === 1 && !n.resolved) {
           if (!n.highRisk && n.interaction) {
@@ -1361,11 +1436,15 @@
       function groupRowHtml(g) {
         var latest = g.latest; // 组内时间倒序首条 = 最新
         var gids = g.list.map(function (n) { return n.id; }).join(',');
+        var cnt = 0; // v1.8 #3：组内完成总次数（doneCount 默认 1，同会话并入累加）
+        for (var ci = 0; ci < g.list.length; ci++) cnt += Number(g.list[ci].doneCount) || 1;
         return '<div class="dshni-item dshni-pr2 dshni-group' + (g.jumpFailed ? ' dshni-group-fail' : '') + '" data-sid="' + esc(g.jumpSid || '_') + '" data-gids="' + esc(gids) + '">' +
           '<div class="dshni-ico">✅</div>' +
           '<div class="dshni-body">' +
             '<div class="dshni-title">' + esc(g.label) + '<span class="dshni-tag">' + esc(KIND_META.done ? KIND_META.done.label : '回复完成') + '</span></div>' +
-            (latest && latest.sub ? '<div class="dshni-meta"><span style="word-break:break-all">最新：' + esc(latest.sub) + '</span></div>' : '') +
+            (cnt > 1
+              ? '<div class="dshni-meta"><span style="word-break:break-all">' + cnt + ' 次完成' + (latest && latest.sub ? ' · 最新：' + esc(latest.sub) : '') + '</span></div>'
+              : (latest && latest.sub ? '<div class="dshni-meta"><span style="word-break:break-all">最新：' + esc(latest.sub) + '</span></div>' : '')) +
             (g.jumpFailed ? '<div class="dshni-jumpfail">⚠ 跳转失败，请手动前往该会话处理</div>' : '') +
             '<div class="dshni-actions"><button class="dshni-btn" data-act="gogroup">查看</button></div>' +
           '</div>' +
@@ -1395,7 +1474,7 @@
         var c = unhandledGroupsCount(); // v1.6：头部 = 未处理组数
         if (headCnt) headCnt.textContent = c > 0 ? c + ' 个待处理' : '';
         var p1 = 0;
-        for (var pi = 0; pi < items.length; pi++) if (items[pi].pr === 1 && !items[pi].resolved) p1++;
+        for (var pi = 0; pi < items.length; pi++) if (items[pi].pr === 1 && !items[pi].resolved && !items[pi].expired) p1++; // v1.8 #2：已过期退出待裁决口径
         if (headPending) headPending.textContent = p1 > 0 ? p1 + ' 条待裁决' : '';
         if (!items.length) {
           list.innerHTML = '<div class="dshni-empty"><div style="font-size:32px;margin-bottom:8px;opacity:.5">🔕</div>暂无通知<br>对话需要你或跑完时，这里会亮</div>';
@@ -1419,10 +1498,11 @@
         groups = buildP2Groups(p2List);
         list.innerHTML =
           p1Rows.map(function (n) {
-            return '<div class="dshni-item dshni-pr' + n.pr + (n.read ? '' : ' dshni-unread') + '" data-id="' + n.id + '">' +
+            return '<div class="dshni-item dshni-pr' + n.pr + (n.read ? '' : ' dshni-unread') + (n.expired ? ' dshni-expired' : '') + '" data-id="' + n.id + '">' +
               '<div class="dshni-ico">' + n.ico + '</div>' +
               '<div class="dshni-body">' +
-                '<div class="dshni-title">' + esc(n.title) + '<span class="dshni-tag">' + esc(KIND_META[n.kind] ? KIND_META[n.kind].label : n.kind) + '</span></div>' +
+                '<div class="dshni-title">' + esc(n.title) + '<span class="dshni-tag">' + esc(KIND_META[n.kind] ? KIND_META[n.kind].label : n.kind) + '</span>' +
+                (n.expired ? '<span class="dshni-tag dshni-tag-expired">已过期</span>' : '') + '</div>' +
                 '<div class="dshni-meta"><span class="dshni-sess">💬 ' + esc(n.sessionLabel || (n.sessionId === currentSessionId() ? '当前会话' : n.sessionId || '')) + '</span>' +
                 (n.sub ? '<span style="word-break:break-all">' + esc(n.sub) + '</span>' : '') + '</div>' +
                 (n.jumpFailed && !n.resolved ? '<div class="dshni-jumpfail">⚠ 跳转失败，请手动前往该会话处理</div>' : '') +
@@ -1463,6 +1543,7 @@
           var item = null;
           for (var i = 0; i < items.length; i++) if (items[i].id === itemEl.getAttribute('data-id')) { item = items[i]; break; }
           if (!item) return;
+          if (item.expired) return; // v1.8 #2：已过期条目只回看，点击不跳转
           if (btn) {
             ev.stopPropagation();
             var act = btn.getAttribute('data-act');
@@ -1770,6 +1851,7 @@
               var restoredItems = loadPersisted();
               if (restoredItems.length) {
                 items = restoredItems.concat(items);
+                expireSweep(); // v1.8：启动即清 P2 化石条目 + 标 P1 过期（角标口径以此为准）
                 try { console.log('[dsh-notify-inline] 持久化恢复 ' + restoredItems.length + ' 条（未处理 ' + unhandledCount() + '）'); } catch (e) {}
                 renderBadge();
                 applyTitle();
@@ -1839,6 +1921,7 @@
               if (disposed) return;
               try { bindCurrentFace(); } catch (e) {}
               try { bindUiSession(); } catch (e) {}
+              try { expireSweep(); } catch (e) {} // v1.8：运行中周期过期检查（P2 超 24h 清除 / P1 超 24h 转过期）
             }, 1500);
             unsubs.push(function () { if (retryTimer) clearInterval(retryTimer); });
             unsubs.push(function () { applyTitle._restore && applyTitle._restore(); });
@@ -1919,7 +2002,7 @@
           _items: function () { return items; },
           pending: function () {
             var c = 0;
-            for (var i = 0; i < items.length; i++) if (items[i].pr === 1 && !items[i].resolved) c++;
+            for (var i = 0; i < items.length; i++) if (items[i].pr === 1 && !items[i].resolved && !items[i].expired) c++; // v1.8 #2：与面板「待裁决」同口径
             return c;
           },
           generation: function () { return probeGeneration(); },
@@ -1944,7 +2027,7 @@
           },
           focus: function (sid) { jumpSessionId(sid || currentSessionId()); }, // 返修 #19
           test: runTest,
-          _internals: { pushItem: pushItem, interactionStore: interactionStore, pendingOf: pendingOf, currentSessionId: currentSessionId, isHighRisk: isHighRisk, HIGH_RISK_RE: HIGH_RISK_RE, cleanBase: cleanBase, applyTitle: applyTitle, decide: decide, hostJump: hostJump, domJump: domJump, jumpSessionId: jumpSessionId, unhandledCount: unhandledCount, unhandledGroupsCount: unhandledGroupsCount, buildP2Groups: buildP2Groups, p2GroupKey: p2GroupKey, groupRowHtml: groupRowHtml, resolveGroupItems: resolveGroupItems, flushDoneBatch: flushDoneBatch, applyTheme: applyTheme, injectStyles: injectStyles, buildBellDOM: buildBellDOM, route: route, requestDoneConfirm: requestDoneConfirm, cancelDoneConfirm: cancelDoneConfirm, cancelAllDoneConfirms: cancelAllDoneConfirms, schedulePersist: schedulePersist, persistNow: persistNow, loadPersisted: loadPersisted, syncDoneFromStatus: syncDoneFromStatus, evalFace: evalFace, evalListRows: evalListRows, sessionNotified: sessionNotified, p2Suppressed: p2Suppressed, markSessionNotified: markSessionNotified, releaseSessionNotified: releaseSessionNotified, pruneResolved: pruneResolved, reportDone: reportDone }
+          _internals: { pushItem: pushItem, interactionStore: interactionStore, pendingOf: pendingOf, currentSessionId: currentSessionId, isHighRisk: isHighRisk, HIGH_RISK_RE: HIGH_RISK_RE, cleanBase: cleanBase, applyTitle: applyTitle, decide: decide, hostJump: hostJump, domJump: domJump, jumpSessionId: jumpSessionId, unhandledCount: unhandledCount, unhandledGroupsCount: unhandledGroupsCount, buildP2Groups: buildP2Groups, p2GroupKey: p2GroupKey, groupRowHtml: groupRowHtml, resolveGroupItems: resolveGroupItems, flushDoneBatch: flushDoneBatch, applyTheme: applyTheme, injectStyles: injectStyles, buildBellDOM: buildBellDOM, route: route, requestDoneConfirm: requestDoneConfirm, cancelDoneConfirm: cancelDoneConfirm, cancelAllDoneConfirms: cancelAllDoneConfirms, schedulePersist: schedulePersist, persistNow: persistNow, loadPersisted: loadPersisted, syncDoneFromStatus: syncDoneFromStatus, evalFace: evalFace, evalListRows: evalListRows, sessionNotified: sessionNotified, p2Suppressed: p2Suppressed, markSessionNotified: markSessionNotified, releaseSessionNotified: releaseSessionNotified, pruneResolved: pruneResolved, reportDone: reportDone, findMergableP2: findMergableP2, pruneExpiredP2: pruneExpiredP2, expireP1: expireP1, expireSweep: expireSweep }
         };
       } catch (e) {}
 
